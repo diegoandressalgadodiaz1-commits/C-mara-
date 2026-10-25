@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cámara</title>
+<style>
+:root{color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html,body{height:100%;margin:0;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+#app{height:100%;display:flex;flex-direction:column}
+#stage{flex:1;position:relative;min-height:0;background:#000}
+video{width:100%;height:100%;object-fit:contain;background:#000}
+video.mirror{transform:scaleX(-1)}
+#info{position:absolute;top:10px;left:10px;font-size:12px;background:rgba(0,0,0,.5);padding:4px 8px;border-radius:8px}
+#rec{position:absolute;top:10px;right:10px;background:#e5252a;padding:4px 10px;border-radius:8px;font-size:13px;display:none}
+#msg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:#000}
+button{font:inherit;color:inherit;border:0;cursor:pointer}
+.primary{background:#fff;color:#000;padding:12px 24px;border-radius:24px;font-weight:600}
+#zoomRow{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:60%;display:none}
+#zoomRow input{width:100%}
+#bar{display:flex;align-items:center;justify-content:space-around;padding:14px 10px 18px;background:#000}
+.side{width:52px;height:52px;border-radius:50%;background:#2a2a2c;font-size:22px;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0}
+.side img{width:100%;height:100%;object-fit:cover}
+#shutter{width:72px;height:72px;border-radius:50%;background:#fff;border:4px solid #000;box-shadow:0 0 0 3px #fff}
+#shutter.recording{background:#e5252a}
+#modes{display:flex;gap:6px;justify-content:center;padding:8px;background:#000}
+#modes button{background:none;padding:6px 14px;border-radius:16px;color:#aaa;font-weight:600;font-size:14px}
+#modes button.on{color:#ffd60a;background:#2a2a2c}
+#gallery{position:absolute;inset:0;background:#000e;display:none;flex-direction:column;z-index:5}
+#gallery header{display:flex;justify-content:space-between;padding:12px 16px}
+#grid{flex:1;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:4px;padding:4px}
+#grid .it{position:relative;aspect-ratio:1;background:#222}
+#grid img,#grid video{width:100%;height:100%;object-fit:cover}
+#grid a{position:absolute;right:4px;bottom:4px;background:#000a;color:#fff;border-radius:8px;padding:3px 8px;font-size:12px;text-decoration:none}
+#flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <video id="v" autoplay playsinline muted></video>
+    <div id="info"></div><div id="rec">● 00:00</div>
+    <div id="zoomRow"><input id="zoom" type="range"></div>
+    <div id="flash"></div>
+    <div id="msg"><div style="font-size:48px">📷</div><div>Para usar la cámara necesitamos tu permiso.</div><button class="primary" id="start">Activar cámara</button><div id="err" style="color:#ff6b6b;font-size:14px;max-width:320px"></div></div>
+    <div id="gallery"><header><b>Galería</b><button id="closeG" class="primary" style="padding:6px 16px">Cerrar</button></header><div id="grid"></div></div>
+  </div>
+  <div id="modes"><button id="mPhoto" class="on">FOTO</button><button id="mVideo">VIDEO</button></div>
+  <div id="bar">
+    <button class="side" id="thumb" aria-label="Galería">🖼</button>
+    <button id="shutter" aria-label="Disparador"></button>
+    <button class="side" id="flip" aria-label="Cambiar cámara">🔄</button>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const v=$('v'),info=$('info'),err=$('err');
+let stream=null,facing='environment',mode='photo',recorder=null,chunks=[],timer=null,t0=0,items=[];
+
+async function open(){
+  err.textContent='';
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){err.textContent='Tu navegador no permite acceder a la cámara (se requiere HTTPS).';return}
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  const base={facingMode:{ideal:facing},width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:60,min:30}};
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:base,audio:true});
+  }catch(e){
+    try{stream=await navigator.mediaDevices.getUserMedia({video:base,audio:false})}
+    catch(e2){
+      err.textContent=(e2.name==='NotAllowedError')?'Permiso denegado. Habilita la cámara en los ajustes del navegador y vuelve a intentar.':('No se pudo abrir la cámara: '+e2.name);
+      $('msg').style.display='flex';return;
+    }
+  }
+  const tr=stream.getVideoTracks()[0];
+  try{await tr.applyConstraints({advanced:[{focusMode:'continuous'},{exposureMode:'continuous'},{whiteBalanceMode:'continuous'}]})}catch(e){}
+  v.srcObject=stream;v.classList.toggle('mirror',facing==='user');
+  $('msg').style.display='none';
+  setupZoom(tr);showInfo(tr);
+}
+function showInfo(tr){const s=tr.getSettings();info.textContent=`${s.width}×${s.height} · ${Math.round(s.frameRate||0)} fps`}
+function setupZoom(tr){
+  const c=tr.getCapabilities?tr.getCapabilities():{},z=$('zoom');
+  if(c.zoom){z.min=c.zoom.min;z.max=c.zoom.max;z.step=c.zoom.step||0.1;z.value=tr.getSettings().zoom||c.zoom.min;$('zoomRow').style.display='block';
+    z.oninput=()=>tr.applyConstraints({advanced:[{zoom:+z.value}]}).catch(()=>{});
+  }else $('zoomRow').style.display='none';
+}
+$('start').onclick=open;
+$('flip').onclick=()=>{if(recorder)return;facing=facing==='user'?'environment':'user';open()};
+
+// Foto: máxima resolución + procesado (contraste, saturación, nitidez suave)
+async function takePhoto(){
+  const tr=stream.getVideoTracks()[0];let src=null;
+  try{if('ImageCapture' in window){const b=await new ImageCapture(tr).takePhoto();src=await createImageBitmap(b)}}catch(e){}
+  if(!src){src=v}
+  const w=src.videoWidth||src.width,h=src.videoHeight||src.height;
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d');x.imageSmoothingQuality='high';
+  x.filter='contrast(1.06) saturate(1.12) brightness(1.02)';
+  if(facing==='user'&&false){x.translate(w,0);x.scale(-1,1)}
+  x.drawImage(src,0,0,w,h);x.filter='none';
+  sharpen(x,w,h,0.35);
+  const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',0.95));
+  add(blob,'image');
+  const f=$('flash');f.style.opacity=.8;setTimeout(()=>f.style.opacity=0,120);
+}
+// Máscara de nitidez ligera (unsharp) por convolución
+function sharpen(x,w,h,a){
+  const sc=Math.min(1,2400/Math.max(w,h));if(sc<1)return; // omitir si es enorme para no congelar
+  const im=x.getImageData(0,0,w,h),d=im.data,o=new Uint8ClampedArray(d);
+  for(let y=1;y<h-1;y++)for(let i=1;i<w-1;i++){const p=(y*w+i)*4;
+    for(let k=0;k<3;k++){const s=5*o[p+k]-o[p+k-4]-o[p+k+4]-o[p+k-w*4]-o[p+k+w*4];d[p+k]=o[p+k]+(s-o[p+k])*a}}
+  x.putImageData(im,0,0);
+}
+function pickMime(){return ['video/mp4;codecs=avc1','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m))||''}
+function startRec(){
+  const mt=pickMime();chunks=[];
+  try{recorder=new MediaRecorder(stream,{mimeType:mt||undefined,videoBitsPerSecond:25000000})}catch(e){err.textContent='Grabación no disponible';return}
+  recorder.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+  recorder.onstop=()=>{add(new Blob(chunks,{type:recorder.mimeType||'video/webm'}),'video');recorder=null};
+  recorder.start(1000);t0=Date.now();$('rec').style.display='block';$('shutter').classList.add('recording');
+  timer=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);$('rec').textContent='● '+String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')},500);
+}
+function stopRec(){recorder.stop();clearInterval(timer);$('rec').style.display='none';$('shutter').classList.remove('recording')}
+$('shutter').onclick=()=>{if(!stream)return;if(mode==='photo')takePhoto();else recorder?stopRec():startRec()};
+function setMode(m){if(recorder)return;mode=m;$('mPhoto').classList.toggle('on',m==='photo');$('mVideo').classList.toggle('on',m==='video')}
+$('mPhoto').onclick=()=>setMode('photo');$('mVideo').onclick=()=>setMode('video');
+
+function add(blob,type){
+  const url=URL.createObjectURL(blob);
+  const ext=type==='image'?'jpg':(blob.type.includes('mp4')?'mp4':'webm');
+  items.unshift({url,type,name:`captura-${Date.now()}.${ext}`});
+  if(type==='image')$('thumb').innerHTML=`<img src="${url}" alt="">`;
+  renderG();
+}
+function renderG(){
+  $('grid').innerHTML=items.map(i=>`<div class="it">${i.type==='image'?`<img src="${i.url}" alt="">`:`<video src="${i.url}" controls playsinline></video>`}<a href="${i.url}" download="${i.name}">Guardar</a></div>`).join('')||'<p style="padding:16px;color:#aaa">Aún no hay capturas.</p>';
+}
+$('thumb').onclick=()=>{renderG();$('gallery').style.display='flex'};
+$('closeG').onclick=()=>$('gallery').style.display='none';
+open();
+</script>
+</body>
+</html>
